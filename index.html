@@ -32,6 +32,11 @@ button.danger{background:#fff;color:#c62828;border-color:#c62828}
  #panel{position:absolute;right:0;top:0;bottom:0;width:min(94vw,370px);box-shadow:-4px 0 14px rgba(0,0,0,.25);z-index:5}
 }
 #pbody{padding:8px}
+#phead{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:6px;padding:6px 8px;background:#fff;border-bottom:1px solid var(--line)}
+#phead b{flex:1;font-size:14px}
+#phead button{padding:6px 12px}
+#pTab{position:absolute;right:8px;bottom:16px;z-index:6;padding:10px 14px;border-radius:22px;background:rgba(21,101,192,.95);color:#fff;border-color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.35);font-size:14px;touch-action:manipulation}
+#pTab:active{background:#0d47a1}
 .pbtns{margin-bottom:8px}
 .pbtns button{width:100%}
 .empty{color:#555;line-height:1.7;padding:6px}
@@ -93,17 +98,27 @@ details.set select,details.set input[type=range]{flex:1}
     <button data-mode="erase">🧽 消す</button>
     <button data-mode="hand">🖐 移動</button>
   </span>
+  <span class="grp" id="modes2">
+    <button data-mode="scale" title="図面上の2点を押して実寸を入力すると縮尺が決まります">📏 縮尺</button>
+    <button data-mode="ext" title="建物の壁などの延長線（仮点線）">┄ 延長線</button>
+    <button data-mode="line" title="2点間の仮点線">┄ 仮線</button>
+    <button data-mode="perp" title="始点から境界の仮線へ直交に引く">⟂ 直交線</button>
+    <button data-mode="meas" title="2点間の距離を測る">↔ 距離</button>
+    <button data-mode="sel" title="仮線・延長線・距離を選択して移動／削除">👆 選択</button>
+    <button id="bSnap" class="on" title="仮線の端点・交点・線上に吸着">🧲 吸着</button>
+    <button id="bOrtho" class="on" title="タッチ・ペン操作で、ほぼ水平／垂直になる場合に自動でまっすぐにします（パソコンはShiftを押しながらで水平／垂直に固定）">⊥ 水平垂直</button>
+  </span>
   <span class="grp"><button id="bUndo">↶</button><button id="bRedo">↷</button><button id="bFit">全体</button></span>
   <button id="bDatum">📐 基準高さ</button>
   <span class="grp" id="bases"><button data-base="p1">基準点1</button><button data-base="kbm">KBM</button><button data-base="gl">GL</button><button data-base="fl">FL</button></span>
   <button id="bNew" class="acc">🔄 レベル据え直し</button>
-  <span class="grp"><button id="bSave">💾 保存</button><button id="bLoad">📥 読込</button><button id="bCsv">CSV</button><button id="bPng">PNG</button></span>
+  <span class="grp"><button id="bSave">💾 保存</button><button id="bLoad">📥 読込</button><button id="bCsv">CSV</button><button id="bPng">PNG</button><button id="bPdf" class="pri">PDF(A3)</button></span>
   <button id="bPanel">📋 測点表</button>
   <button id="bClean" title="キャッシュ整理">🧹</button>
 </div>
 <div id="main">
-  <div id="wrap"><canvas id="cv"></canvas><div id="hud"></div></div>
-  <aside id="panel"><div id="pbody"></div></aside>
+  <div id="wrap"><canvas id="cv"></canvas><div id="hud"></div><button id="pTab" type="button">📋 測点表を表示</button></div>
+  <aside id="panel"><div id="phead"><b>📋 測点表</b><button id="pClose" type="button">✕ 閉じる</button></div><div id="pbody"></div></aside>
 </div>
 <div id="modal"></div>
 <div id="toast"></div>
@@ -115,7 +130,7 @@ details.set select,details.set input[type=range]{flex:1}
 (()=>{
 'use strict';
 const $=s=>document.querySelector(s);
-const LP_MS=550, MOVE_TH=8;
+const LP_MS=550, MOVE_TH=8, HOLD_MS=260;
 const COLORS=['#1565c0','#2e7d32','#ef6c00','#6a1b9a','#00838f','#ad1457','#4e342e','#455a64'];
 const PEN_COLORS=['#111111','#1565c0','#2e7d32','#d32f2f','#8e24aa'];
 
@@ -126,7 +141,8 @@ const S={
   datum:{k:null,g:null,f:null},base:'p1',
   mode:'write',pickRef:false,pen:{color:'#111111',w:2.5},
   unit:'mm',labelMode:'h',mk:1,finger:false,
-  view:{s:1,tx:0,ty:0},sel:null,setOpen:false
+  view:{s:1,tx:0,ty:0},sel:null,setOpen:false,
+  scales:{},refs:[],meas:[],snapOn:true,orthoAuto:true,tmp:null,hover:null,hi:null,rs:1,selA:null,cross:false
 };
 let CALC={elev:{},hi:{},err:{}}, TAGS={};
 const undoSt=[],redoSt=[];
@@ -145,7 +161,7 @@ DB.del=function(k){return this.open().then(db=>new Promise((res,rej)=>{const t=d
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtSize=n=>n<1024?n+'B':n<1048576?Math.round(n/1024)+'KB':(n/1048576).toFixed(1)+'MB';
 const fmtDate=t=>{const d=new Date(t||0);return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;};
-const EMPTY_DATA=()=>({points:[],strokes:[],setups:[],activeId:null,nextNo:1,nextId:1,datum:{k:null,g:null,f:null}});
+const EMPTY_DATA=()=>({points:[],strokes:[],setups:[],activeId:null,nextNo:1,nextId:1,datum:{k:null,g:null,f:null},scales:{},refs:[],meas:[]});
 
 /* ---------- 現場管理 ---------- */
 // 保存キー: sites=現場一覧(メタ) / cur=表示中の現場 / sd:<id>=測定データ / sf:<id>=図面ファイル / settings=表示設定
@@ -168,7 +184,7 @@ async function flushSave(){
 }
 function updateSiteBtn(){$('#siteName').textContent=S.siteName||'—';}
 function resetDoc(){
-  S.bytes=null;S.pdfDoc=null;S.imgCanvas=null;S.bg=null;S.W=0;S.H=0;S.fileName='';S.kind='';S.mime='';S.pageNo=1;S.numPages=0;
+  S.hi=null;S.bytes=null;S.pdfDoc=null;S.imgCanvas=null;S.bg=null;S.W=0;S.H=0;S.fileName='';S.kind='';S.mime='';S.pageNo=1;S.numPages=0;
   restoreData(EMPTY_DATA());undoSt.length=0;redoSt.length=0;
 }
 async function createSite(name){
@@ -306,10 +322,10 @@ async function openCleanup(fromMgr){
 /* ---------- データ ---------- */
 const nid=()=>S.nextId++;
 const pointById=id=>S.points.find(p=>p.id===id);
-function dataOf(){return {points:S.points,strokes:S.strokes,setups:S.setups,activeId:S.activeId,nextNo:S.nextNo,nextId:S.nextId,datum:S.datum};}
-function settingsOf(){return {unit:S.unit,labelMode:S.labelMode,mk:S.mk,finger:S.finger,base:S.base,penColor:S.pen.color,penW:S.pen.w};}
-function restoreData(d){S.points=d.points||[];S.strokes=d.strokes||[];S.setups=d.setups||[];S.activeId=d.activeId??null;S.nextNo=d.nextNo||1;S.nextId=d.nextId||1;S.datum=Object.assign({k:null,g:null,f:null},d.datum||{});S.sel=null;S.pickRef=false;S.points.forEach(p=>{if(p.ax===undefined){p.ax=p.x;p.ay=p.y;}});}
-function applySettings(s){if(!s)return;S.unit=s.unit||'mm';S.labelMode=s.labelMode||'h';S.mk=s.mk||1;S.finger=!!s.finger;S.base=['p1','kbm','gl','fl'].includes(s.base)?s.base:'p1';if(s.penColor)S.pen.color=s.penColor;if(s.penW)S.pen.w=s.penW;syncBar();}
+function dataOf(){return {points:S.points,strokes:S.strokes,setups:S.setups,activeId:S.activeId,nextNo:S.nextNo,nextId:S.nextId,datum:S.datum,scales:S.scales,refs:S.refs,meas:S.meas};}
+function settingsOf(){return {unit:S.unit,labelMode:S.labelMode,mk:S.mk,finger:S.finger,snapOn:S.snapOn,orthoAuto:S.orthoAuto,base:S.base,penColor:S.pen.color,penW:S.pen.w};}
+function restoreData(d){S.points=d.points||[];S.strokes=d.strokes||[];S.setups=d.setups||[];S.activeId=d.activeId??null;S.nextNo=d.nextNo||1;S.nextId=d.nextId||1;S.datum=Object.assign({k:null,g:null,f:null},d.datum||{});S.scales=d.scales||{};S.refs=d.refs||[];S.meas=d.meas||[];S.tmp=null;S.hover=null;S.sel=null;S.selA=null;S.pickRef=false;S.points.forEach(p=>{if(p.ax===undefined){p.ax=p.x;p.ay=p.y;}});}
+function applySettings(s){if(!s)return;S.unit=s.unit||'mm';S.labelMode=s.labelMode||'h';S.mk=s.mk||1;S.finger=!!s.finger;S.snapOn=s.snapOn!==false;S.orthoAuto=s.orthoAuto!==false;S.base=['p1','kbm','gl','fl'].includes(s.base)?s.base:'p1';if(s.penColor)S.pen.color=s.penColor;if(s.penW)S.pen.w=s.penW;syncBar();}
 function snapshot(){undoSt.push(JSON.stringify(dataOf()));if(undoSt.length>60)undoSt.shift();redoSt.length=0;}
 function undo(){if(!undoSt.length)return toast('これ以上戻せません');redoSt.push(JSON.stringify(dataOf()));restoreData(JSON.parse(undoSt.pop()));refresh();}
 function redo(){if(!redoSt.length)return toast('やり直す操作がありません');undoSt.push(JSON.stringify(dataOf()));restoreData(JSON.parse(redoSt.pop()));refresh();}
@@ -358,7 +374,7 @@ function refresh(){
 }
 function resize(){
   const r=wrap.getBoundingClientRect(),dpr=devicePixelRatio||1;
-  cv.width=Math.max(1,Math.round(r.width*dpr));cv.height=Math.max(1,Math.round(r.height*dpr));draw();
+  cv.width=Math.max(1,Math.round(r.width*dpr));cv.height=Math.max(1,Math.round(r.height*dpr));draw();scheduleHi();
 }
 function fitView(){
   const r=wrap.getBoundingClientRect();if(!S.W)return;
@@ -368,7 +384,7 @@ function fitView(){
 const toPlan=(x,y)=>({x:(x-S.view.tx)/S.view.s,y:(y-S.view.ty)/S.view.s});
 function zoomAt(x,y,f){
   const v=S.view,ns=Math.min(30,Math.max(0.05,v.s*f)),k=ns/v.s;
-  v.tx=x-(x-v.tx)*k;v.ty=y-(y-v.ty)*k;v.s=ns;draw();
+  v.tx=x-(x-v.tx)*k;v.ty=y-(y-v.ty)*k;v.s=ns;draw();scheduleHi();
 }
 function drawStroke(ctx,st){
   const a=st.pts;if(a.length<2)return;
@@ -396,7 +412,9 @@ function drawMarker(ctx,p,x,y,k){
   const e=CALC.elev[p.id];
   const l1=S.base==='p1'?(isP1?'±0':fmtH(e)):BASE_NAME[S.base]+fmtH(heightIn(p.id,S.base));
   const parts=[];
-  if(S.labelMode==='hr')parts.push('読'+fmtR(p.reading));
+  const later=S.setups.filter(z=>z.refPointId===p.id&&z.idx>0);
+  if(later.length)parts.push('読 '+[p.reading,...later.map(z=>z.refReading)].map((v,i)=>`${i+1}回目 ${fmtR(v)}`).join(' / '));
+  else if(S.labelMode==='hr')parts.push('読'+fmtR(p.reading));
   if(tags.length)parts.push(tags.join(' '));
   const l2=parts.join('  ');
   const f1=`bold ${16*base}px sans-serif`,f2=`${11*base}px sans-serif`;
@@ -428,14 +446,335 @@ function drawLeader(ctx,p,v,k){
   ctx.strokeStyle=col;ctx.lineWidth=2*base;ctx.stroke();
   ctx.beginPath();ctx.arc(ax,ay,2.2*base,0,Math.PI*2);ctx.fillStyle=col;ctx.fill();
 }
+/* ---------- 縮尺・仮線・距離測定 ---------- */
+const MEAS=['scale','ext','line','perp','meas'];
+const C_REF='#d81b60',C_MEAS='#00695c',C_SC='#6a1b9a';
+let lastScaleUnit='mm';
+const LBL=[]; // 画面に描いた寸法ラベルの位置（ドラッグ移動の当たり判定用）
+function hitLabel(x,y){
+  for(let i=LBL.length-1;i>=0;i--){const b=LBL[i];if(Math.abs(x-b.cx)<=b.bw/2+6&&Math.abs(y-b.cy)<=b.bh/2+6)return b;}
+  return null;
+}
+const scr=(v,p)=>({x:p.x*v.s+v.tx,y:p.y*v.s+v.ty});
+const scaleOf=()=>S.scales[S.pageNo]||null;
+function mmPerPx(){
+  const sc=scaleOf();if(!sc)return null;
+  const d=Math.hypot(sc.a.x-sc.b.x,sc.a.y-sc.b.y);
+  return d>0?sc.mm/d:null;
+}
+function distMM(a,b){const k=mmPerPx();return k==null?null:Math.hypot(a.x-b.x,a.y-b.y)*k;}
+const fmtMM=mm=>mm==null?'—':(mm<100?(Math.round(mm*10)/10):Math.round(mm)).toLocaleString('ja-JP')+' mm';
+const fmtM=mm=>mm==null?'—':(mm/1000).toFixed(3)+' m';
+const pageRefs=()=>S.refs.filter(r=>r.page===S.pageNo);
+const inDom=(r,t)=>r.ext||(t>=-0.002&&t<=1.002);
+function projT(a,b,p){const dx=b.x-a.x,dy=b.y-a.y,L=dx*dx+dy*dy;return L?((p.x-a.x)*dx+(p.y-a.y)*dy)/L:0;}
+function lineInter(r1,r2){
+  const d1x=r1.b.x-r1.a.x,d1y=r1.b.y-r1.a.y,d2x=r2.b.x-r2.a.x,d2y=r2.b.y-r2.a.y;
+  const den=d1x*d2y-d1y*d2x;if(Math.abs(den)<1e-9)return null;
+  const ex=r2.a.x-r1.a.x,ey=r2.a.y-r1.a.y;
+  const t=(ex*d2y-ey*d2x)/den,u=(ex*d1y-ey*d1x)/den;
+  return {x:r1.a.x+t*d1x,y:r1.a.y+t*d1y,t,u};
+}
+function clipLine(a,b){
+  const dx=b.x-a.x,dy=b.y-a.y;if(!dx&&!dy)return null;
+  let t0=-1e9,t1=1e9;
+  const slab=(p,d,mn,mx)=>{
+    if(Math.abs(d)<1e-12)return p>=mn&&p<=mx;
+    let ta=(mn-p)/d,tb=(mx-p)/d;if(ta>tb){const z=ta;ta=tb;tb=z;}
+    t0=Math.max(t0,ta);t1=Math.min(t1,tb);return true;
+  };
+  if(!slab(a.x,dx,0,S.W)||!slab(a.y,dy,0,S.H)||t0>t1)return null;
+  return [{x:a.x+t0*dx,y:a.y+t0*dy},{x:a.x+t1*dx,y:a.y+t1*dy}];
+}
+const refSeg=r=>r.ext?clipLine(r.a,r.b):[r.a,r.b];
+function distSegP(p,a,b){
+  const dx=b.x-a.x,dy=b.y-a.y,L=dx*dx+dy*dy;
+  let t=L?((p.x-a.x)*dx+(p.y-a.y)*dy)/L:0;t=Math.max(0,Math.min(1,t));
+  return Math.hypot(p.x-(a.x+t*dx),p.y-(a.y+t*dy));
+}
+function distLineP(p,a,b){
+  const dx=b.x-a.x,dy=b.y-a.y,L=Math.hypot(dx,dy);
+  return L?Math.abs((p.x-a.x)*dy-(p.y-a.y)*dx)/L:Math.hypot(p.x-a.x,p.y-a.y);
+}
+// 吸着：①端点・既存の点 ②仮線どうしの交点 ③仮線上の最寄り点
+function snapAt(sx,sy){
+  const pl=toPlan(sx,sy),raw={x:pl.x,y:pl.y,kind:'free'};
+  if(!S.snapOn)return raw;
+  const tol=16/S.view.s,refs=pageRefs();
+  let best=null,bd=tol;
+  const tryPt=(q,kind)=>{const d=Math.hypot(q.x-pl.x,q.y-pl.y);if(d<bd){bd=d;best={x:q.x,y:q.y,kind};}};
+  for(const r of refs){tryPt(r.a,'pt');tryPt(r.b,'pt');}
+  for(const m of S.meas) if(m.page===S.pageNo){tryPt(m.a,'pt');tryPt(m.b,'pt');}
+  for(const p of S.points) if(p.page===S.pageNo)tryPt({x:p.ax,y:p.ay},'pt');
+  if(best)return best;
+  bd=tol;
+  for(let i=0;i<refs.length;i++)for(let j=i+1;j<refs.length;j++){
+    const q=lineInter(refs[i],refs[j]);
+    if(!q||!inDom(refs[i],q.t)||!inDom(refs[j],q.u))continue;
+    tryPt(q,'int');
+  }
+  if(best)return best;
+  bd=tol;
+  for(const r of refs){
+    const t=projT(r.a,r.b,pl);if(!inDom(r,t))continue;
+    tryPt({x:r.a.x+t*(r.b.x-r.a.x),y:r.a.y+t*(r.b.y-r.a.y)},'on');
+  }
+  return best||raw;
+}
+function hitRef(pl,tolPx,skip){
+  const tol=tolPx/S.view.s;let best=null,bd=tol;
+  for(const r of pageRefs()){
+    if(skip&&skip(r))continue;
+    const sg=refSeg(r);if(!sg)continue;
+    const d=distSegP(pl,sg[0],sg[1]);if(d<bd){bd=d;best=r;}
+  }
+  return best;
+}
+function footOn(r,P){
+  const t=projT(r.a,r.b,P);
+  return {t,F:{x:r.a.x+t*(r.b.x-r.a.x),y:r.a.y+t*(r.b.y-r.a.y)}};
+}
+function dot(ctx,x,y,col,base){
+  ctx.beginPath();ctx.arc(x,y,4.2*base,0,Math.PI*2);ctx.fillStyle=col;ctx.fill();
+  ctx.strokeStyle='#fff';ctx.lineWidth=1.6*base;ctx.stroke();
+}
+function lineTag(ctx,A,B,l1,l2,col,base,sh){
+  const f1=`bold ${14*base}px sans-serif`,f2=`${10.5*base}px sans-serif`;
+  ctx.font=f1;const w1=ctx.measureText(l1).width;
+  let w2=0;if(l2){ctx.font=f2;w2=ctx.measureText(l2).width;}
+  const pad=5*base,bw=Math.max(w1,w2)+pad*2,bh=l2?(14+10.5+9)*base:(14+7)*base;
+  let dx=B.x-A.x,dy=B.y-A.y;const L=Math.hypot(dx,dy)||1;
+  let nx=-dy/L,ny=dx/L;if(ny>0||(ny===0&&nx<0)){nx=-nx;ny=-ny;}
+  const off=Math.abs(nx)*bw/2+Math.abs(ny)*bh/2+4*base;
+  let cx=(A.x+B.x)/2+nx*off,cy=(A.y+B.y)/2+ny*off;
+  if(sh&&Math.hypot(sh.x,sh.y)>3){
+    cx+=sh.x;cy+=sh.y;
+    ctx.setLineDash([]);ctx.beginPath();ctx.moveTo((A.x+B.x)/2,(A.y+B.y)/2);ctx.lineTo(cx,cy);
+    ctx.strokeStyle=col;ctx.lineWidth=1.3*base;ctx.stroke();
+  }
+  rr(ctx,cx-bw/2,cy-bh/2,bw,bh,5*base);ctx.fillStyle='rgba(255,255,255,.94)';ctx.fill();
+  ctx.strokeStyle=col;ctx.lineWidth=1.5*base;ctx.stroke();
+  ctx.textAlign='center';ctx.textBaseline='top';ctx.fillStyle='#111';
+  ctx.font=f1;ctx.fillText(l1,cx,cy-bh/2+3*base);
+  if(l2){ctx.font=f2;ctx.fillStyle='#444';ctx.fillText(l2,cx,cy-bh/2+3*base+15*base);}
+  return {cx,cy,bw,bh};
+}
+function tick(ctx,P,Q,col,base){
+  const dx=Q.x-P.x,dy=Q.y-P.y,L=Math.hypot(dx,dy)||1,nx=-dy/L*7*base,ny=dx/L*7*base;
+  ctx.beginPath();ctx.moveTo(P.x-nx,P.y-ny);ctx.lineTo(P.x+nx,P.y+ny);
+  ctx.strokeStyle='#fff';ctx.lineWidth=4.2*base;ctx.stroke();
+  ctx.strokeStyle=col;ctx.lineWidth=2*base;ctx.stroke();
+}
+function solid(ctx,A,B,col,base){
+  ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);
+  ctx.strokeStyle='#fff';ctx.lineWidth=5*base;ctx.stroke();
+  ctx.strokeStyle=col;ctx.lineWidth=2.4*base;ctx.stroke();
+}
+function drawAnno(ctx,v,k){
+  const base=S.mk*k,pg=S.pageNo,mp=mmPerPx();
+  if(v===S.view)LBL.length=0;
+  ctx.save();ctx.lineCap='round';
+  // 仮点線
+  for(const r of S.refs){
+    if(r.page!==pg)continue;
+    const sg=refSeg(r);if(!sg)continue;
+    const A=scr(v,sg[0]),B=scr(v,sg[1]);
+    if(S.selA===r.id&&v===S.view){ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);ctx.strokeStyle='rgba(255,214,0,.65)';ctx.lineWidth=13*base;ctx.stroke();}
+    ctx.setLineDash([9*base,6*base]);
+    ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);
+    ctx.strokeStyle='rgba(255,255,255,.9)';ctx.lineWidth=4.6*base;ctx.stroke();
+    ctx.strokeStyle=C_REF;ctx.lineWidth=2.2*base;ctx.stroke();
+    ctx.setLineDash([]);
+    const a=scr(v,r.a),b=scr(v,r.b);
+    dot(ctx,a.x,a.y,C_REF,base);dot(ctx,b.x,b.y,C_REF,base);
+    if(r.kind==='perp'&&r.dir){
+      const ux=a.x-b.x,uy=a.y-b.y,L=Math.hypot(ux,uy);
+      if(L>14*base){
+        const e1x=ux/L*9*base,e1y=uy/L*9*base;
+        let e2x=r.dir.x*9*base,e2y=r.dir.y*9*base;
+        if(e1x*e2y-e1y*e2x===0){e2x=0;e2y=0;}
+        ctx.beginPath();ctx.moveTo(b.x+e1x,b.y+e1y);ctx.lineTo(b.x+e1x+e2x,b.y+e1y+e2y);ctx.lineTo(b.x+e2x,b.y+e2y);
+        ctx.strokeStyle=C_REF;ctx.lineWidth=1.6*base;ctx.stroke();
+      }
+    }
+  }
+  // 距離測定
+  for(const m of S.meas){
+    if(m.page!==pg)continue;
+    const A=scr(v,m.a),B=scr(v,m.b);
+    if(S.selA===m.id&&v===S.view){ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);ctx.strokeStyle='rgba(255,214,0,.65)';ctx.lineWidth=13*base;ctx.stroke();}
+    solid(ctx,A,B,C_MEAS,base);tick(ctx,A,B,C_MEAS,base);tick(ctx,B,A,C_MEAS,base);
+    const d=mp?Math.hypot(m.a.x-m.b.x,m.a.y-m.b.y)*mp:null;
+    const rc=lineTag(ctx,A,B,fmtMM(d),null,C_MEAS,base,null);
+    if(v===S.view)LBL.push({m,cx:rc.cx,cy:rc.cy,bw:rc.bw,bh:rc.bh});
+  }
+  ctx.restore();
+}
+function snapMark(ctx,x,y,kind){
+  const draw1=(col,w)=>{ctx.strokeStyle=col;ctx.lineWidth=w;};
+  const shape=()=>{
+    ctx.beginPath();
+    if(kind==='pt')ctx.arc(x,y,9,0,Math.PI*2);
+    else if(kind==='int'){ctx.moveTo(x-8,y-8);ctx.lineTo(x+8,y+8);ctx.moveTo(x+8,y-8);ctx.lineTo(x-8,y+8);}
+    else if(kind==='on'){ctx.moveTo(x,y-9);ctx.lineTo(x+9,y);ctx.lineTo(x,y+9);ctx.lineTo(x-9,y);ctx.closePath();}
+    else{ctx.moveTo(x-8,y);ctx.lineTo(x+8,y);ctx.moveTo(x,y-8);ctx.lineTo(x,y+8);}
+  };
+  const col=kind==='pt'?'#2e7d32':kind==='int'?'#e65100':kind==='on'?'#1565c0':kind==='ortho'?'#ef6c00':'rgba(0,0,0,.6)';
+  shape();draw1('#fff',5);ctx.stroke();shape();draw1(col,2.2);ctx.stroke();
+}
+function drawPreview(ctx,dpr){
+  if(!MEAS.includes(S.mode)||S.pickRef)return;
+  const v=S.view,t=S.tmp,mp=mmPerPx();
+  ctx.save();ctx.setTransform(dpr,0,0,dpr,0,0);ctx.lineCap='round';
+  if(t&&t.pts.length){
+    const A=scr(v,t.pts[0]);
+    if(t.mode==='perp'){
+      if(S.hover){
+        const P=t.pts[0],r=hitRef(S.hover,26,q=>distLineP(P,q.a,q.b)<1.5);
+        if(r){
+          const F=footOn(r,P).F,Fs=scr(v,F);
+          ctx.setLineDash([8,6]);ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(Fs.x,Fs.y);
+          ctx.strokeStyle=C_REF;ctx.lineWidth=2;ctx.stroke();ctx.setLineDash([]);
+        }
+      }
+    }else{
+      const Q=t.pts[1]||S.hover;
+      if(Q){
+        const B=scr(v,Q),col=t.mode==='meas'?C_MEAS:t.mode==='scale'?C_SC:C_REF;
+        if(false){}
+        else{
+          let sg=[A,B];
+          if(t.mode==='ext'){const c=clipLine(t.pts[0],Q);if(c)sg=[scr(v,c[0]),scr(v,c[1])];}
+          ctx.setLineDash([9,6]);ctx.beginPath();ctx.moveTo(sg[0].x,sg[0].y);ctx.lineTo(sg[1].x,sg[1].y);
+          ctx.strokeStyle=col;ctx.lineWidth=2.2;ctx.stroke();ctx.setLineDash([]);
+        }
+        if(mp&&t.mode==='meas'){
+          const d=Math.hypot(Q.x-t.pts[0].x,Q.y-t.pts[0].y)*mp;
+          lineTag(ctx,A,B,fmtMM(d),null,col,1);
+        }
+      }
+    }
+    ctx.beginPath();ctx.arc(A.x,A.y,7,0,Math.PI*2);ctx.strokeStyle='#fff';ctx.lineWidth=5;ctx.stroke();
+    ctx.strokeStyle='#e53935';ctx.lineWidth=2.4;ctx.stroke();
+    if(t.pts[1]){const B2=scr(v,t.pts[1]);ctx.beginPath();ctx.arc(B2.x,B2.y,7,0,Math.PI*2);ctx.strokeStyle='#fff';ctx.lineWidth=5;ctx.stroke();ctx.strokeStyle='#e53935';ctx.lineWidth=2.4;ctx.stroke();}
+  }
+  if(S.hover){const H=scr(v,S.hover);
+    if(S.cross){const L=34;ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(H.x-L,H.y);ctx.lineTo(H.x+L,H.y);ctx.moveTo(H.x,H.y-L);ctx.lineTo(H.x,H.y+L);ctx.strokeStyle='#fff';ctx.lineWidth=4.5;ctx.stroke();ctx.strokeStyle='#e53935';ctx.lineWidth=1.8;ctx.stroke();}
+    snapMark(ctx,H.x,H.y,S.hover.kind);}
+  ctx.restore();
+}
+function askDistance(o){
+  return new Promise(res=>{
+    const m=$('#modal');m.classList.add('show');m.onclick=null;m.onchange=null;
+    m.innerHTML=`<div class="box"><h3>📏 縮尺設定</h3><p class="note">押さえた2点間の【実際の寸法】を入力してください（図面の寸法線の値など）。この寸法をもとに、図面上のほかの部位の距離を測れます。</p>
+      <label>2点間の実寸</label>
+      <div style="display:flex;gap:8px"><input id="dv" type="text" inputmode="decimal" autocomplete="off" value="${o.value??''}" style="flex:1;min-width:0"><select id="du" style="width:92px"><option value="mm">mm</option><option value="m">m</option></select></div>
+      <div id="dpv" class="prev">&nbsp;</div>
+      <div class="btns"><span class="sp"></span><button id="dcx">キャンセル</button><button id="dox" class="pri">決定</button></div></div>`;
+    const inp=$('#dv'),sel=$('#du');sel.value=lastScaleUnit;
+    const val=()=>{const n=parseNum(inp.value);return n==null||n<=0?null:n*(sel.value==='m'?1000:1);};
+    const upd=()=>{const mm=val();$('#dpv').textContent=mm==null?'0より大きい数値を入力してください':`2点間 ${Math.round(o.dpx)}px ＝ ${fmtMM(mm)}（1px ＝ ${(mm/o.dpx).toFixed(3)} mm）`;};
+    const close=r=>{closeModal();res(r);};
+    inp.addEventListener('input',upd);sel.addEventListener('change',upd);
+    inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing)$('#dox').click();});
+    $('#dox').onclick=()=>{const mm=val();if(mm==null){inp.focus();return;}lastScaleUnit=sel.value;close({mm});};
+    $('#dcx').onclick=()=>close(null);
+    upd();setTimeout(()=>{inp.focus();inp.select();},60);
+  });
+}
+function measHint(){
+  const m=S.mode,n=S.tmp?S.tmp.pts.length:0,sc=mmPerPx();
+  const st=sc?'縮尺：設定済み':'縮尺：未設定';
+  const mv='（押さえると十字が出ます→動かして合わせ、離した位置で確定／2本指で移動・拡大）';
+  if(m==='scale')return `📏 縮尺設定（${st}）：${n?'② 実寸が分かっているもう1点を押さえて離す':'① 実寸が分かっている2点（寸法線の両端など）を順に押さえて離す'}${mv}`+(n?' <button id="hTmp">中止</button>':'');
+  if(m==='ext')return `┄ 延長線（仮点線）：${n?'② 同じ線上の2点目を押さえて離す → ページ全体に延長します':'① 延ばしたい線（建物の壁など）の1点目を押さえて離す'}${mv}`+(n?' <button id="hTmp">中止</button>':'');
+  if(m==='line')return `┄ 仮線（仮点線）：${n?'② 終点を押さえて離す':'① 始点を押さえて離す（端点・交点・線上に吸着）'}${mv}`+(n?' <button id="hTmp">中止</button>':'');
+  if(m==='perp')return `⟂ 直交線：${n?'② 境界の仮線を押さえて離す → 始点から直交に引きます':'① 始点を押さえて離す（建物の延長線上など）。先に境界を「┄仮線」でなぞっておきます'}${mv}`+(n?' <button id="hTmp">中止</button>':'');
+  return `↔ 距離測定（${st}）：${sc?(n?'② 2点目を押さえて離す':'① 1点目を押さえて離す（仮線の端点・交点・線上に吸着）／寸法の文字はドラッグで水平・垂直に移動'):'⚠ 先に「📏 縮尺」を設定してください'}${mv}`+(n?' <button id="hTmp">中止</button>':'');
+}
+const annoById=id=>S.refs.find(q=>q.id===id)||S.meas.find(q=>q.id===id);
+function annoName(o){return S.meas.includes(o)?'距離':o.kind==='ext'?'延長線':o.kind==='perp'?'直交線':'仮線';}
+function delAnno(){const o=annoById(S.selA);if(!o)return;snapshot();S.refs=S.refs.filter(q=>q.id!==o.id);S.meas=S.meas.filter(q=>q.id!==o.id);S.selA=null;refresh();}
+function selectAt(x,y){
+  const pl=toPlan(x,y),tol=22/S.view.s;let best=null,bd=tol;
+  for(const r of pageRefs()){const sg=refSeg(r);if(!sg)continue;const d=distSegP(pl,sg[0],sg[1]);if(d<bd){bd=d;best=r;}}
+  for(const q of S.meas){if(q.page!==S.pageNo)continue;const d=distSegP(pl,q.a,q.b);if(d<bd){bd=d;best=q;}}
+  S.selA=best?best.id:null;updateHud();draw();
+}
+function setMode(m){
+  S.mode=m;S.tmp=null;S.hover=null;
+  if(m!=='write')S.pickRef=false;
+  if(MEAS.includes(m))S.sel=null;S.selA=null;S.cross=false;
+  syncBar();updateHud();draw();
+}
+// 2点目の水平・垂直補正：Shift＝常に固定 ／ タッチ・ペン＝ほぼ水平垂直なら自動で固定
+function pickPt(sx,sy,opt){
+  const q=snapAt(sx,sy),t=S.tmp;
+  if(!t||t.pts.length!==1||!['scale','ext','line','meas'].includes(t.mode))return q;
+  const A=t.pts[0],dx=q.x-A.x,dy=q.y-A.y;
+  if(Math.hypot(dx,dy)<1e-6)return q;
+  const horiz=Math.abs(dx)>=Math.abs(dy);
+  const along=horiz?Math.abs(dx):Math.abs(dy),off=horiz?Math.abs(dy):Math.abs(dx);
+  const near=Math.atan2(off,along)<0.087||off*S.view.s<8;
+  const lock=opt&&(opt.shift||(opt.touch&&S.orthoAuto&&q.kind==='free'&&near));
+  if(!lock)return q;
+  return {x:horiz?q.x:A.x,y:horiz?A.y:q.y,kind:'ortho'};
+}
+async function onTap(x,y,opt){
+  const m=S.mode;
+  if(!MEAS.includes(m)||!S.bg)return;
+  // 直交線の2手目：境界の仮線を選ぶ
+  if(m==='perp'&&S.tmp&&S.tmp.mode==='perp'&&S.tmp.pts.length===1){
+    const P=S.tmp.pts[0],pl=toPlan(x,y);
+    if(!pageRefs().length){toast('先に境界の仮線を引いてください（┄仮線 / ┄延長線）');return;}
+    const r=hitRef(pl,26,q=>distLineP(P,q.a,q.b)<1.5);
+    if(!r){toast('境界の仮線の近くをタップしてください（始点が乗っている線は選べません）');return;}
+    const len=Math.hypot(r.b.x-r.a.x,r.b.y-r.a.y);if(!len)return;
+    const {t,F}=footOn(r,P);
+    if(Math.hypot(F.x-P.x,F.y-P.y)<2){toast('始点が線上にあります');return;}
+    snapshot();
+    S.refs.push({id:nid(),page:S.pageNo,kind:'perp',ext:false,a:{x:P.x,y:P.y},b:F,dir:{x:(r.b.x-r.a.x)/len,y:(r.b.y-r.a.y)/len}});
+    S.tmp=null;refresh();
+    if(!inDom(r,t))toast('境界線の延長上に直交線を引きました');
+    return;
+  }
+  if(m==='meas'&&!mmPerPx()){toast('先に「📏 縮尺」を設定してください');setMode('scale');return;}
+  const q=pickPt(x,y,opt||{}),pt={x:q.x,y:q.y};
+  if(!S.tmp||S.tmp.mode!==m){S.tmp={mode:m,pts:[pt]};S.hover=null;updateHud();draw();return;}
+  const a=S.tmp.pts[0];
+  if(Math.hypot(pt.x-a.x,pt.y-a.y)<2){toast('同じ位置です。別の点をタップしてください');return;}
+  if(m==='scale'){
+    S.tmp.pts.push(pt);draw();
+    const dpx=Math.hypot(pt.x-a.x,pt.y-a.y);
+    const cur=scaleOf();
+    const r=await askDistance({dpx,value:cur?Math.round(cur.mm*10)/10:''});
+    S.tmp=null;
+    if(r){snapshot();S.scales[S.pageNo]={a:{x:a.x,y:a.y},b:pt,mm:r.mm};refresh();toast(`縮尺を設定しました（${fmtMM(r.mm)}）。次は仮線を引くか「↔ 距離」で測れます`);}
+    else{updateHud();draw();}
+    return;
+  }
+  if(m==='ext'||m==='line'){
+    snapshot();S.refs.push({id:nid(),page:S.pageNo,kind:m==='ext'?'ext':'seg',ext:m==='ext',a:{x:a.x,y:a.y},b:pt});
+    S.tmp=null;refresh();return;
+  }
+  if(m==='meas'){
+    snapshot();S.meas.push({id:nid(),page:S.pageNo,a:{x:a.x,y:a.y},b:pt});
+    S.tmp=null;refresh();
+    const d=distMM(a,pt);toast(`距離 ${fmtMM(d)}（${fmtM(d)}）`);
+  }
+}
+function focusXY(x,y){const r=wrap.getBoundingClientRect();S.view.tx=r.width/2-x*S.view.s;S.view.ty=r.height/2-y*S.view.s;draw();}
+
 function renderScene(ctx,dpr,v,k,live){
   ctx.save();
   ctx.setTransform(dpr*v.s,0,0,dpr*v.s,dpr*v.tx,dpr*v.ty);
-  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality=S.gesturing?'low':'high';
   ctx.fillStyle='#fff';ctx.fillRect(0,0,S.W,S.H);ctx.drawImage(S.bg,0,0);
+  if(live&&S.hi&&S.hi.page===S.pageNo)ctx.drawImage(S.hi.c,S.hi.x0,S.hi.y0,S.hi.w,S.hi.h);
   for(const st of S.strokes) if(st.page===S.pageNo)drawStroke(ctx,st);
   if(live&&g&&g.stroke)drawStroke(ctx,g.stroke);
   ctx.setTransform(dpr,0,0,dpr,0,0);
+  drawAnno(ctx,v,k);
   for(const p of S.points) if(p.page===S.pageNo)drawLeader(ctx,p,v,k);
   for(const p of S.points) if(p.page===S.pageNo)drawMarker(ctx,p,p.x*v.s+v.tx,p.y*v.s+v.ty,k);
   ctx.restore();
@@ -448,6 +787,7 @@ function draw(){
     ctx.fillText('「図面を開く」からPDF配置図を読み込んでください',cv.width/dpr/2,cv.height/dpr/2);return;
   }
   renderScene(ctx,dpr,S.view,1,true);
+  drawPreview(ctx,dpr);
   if(lp){
     const pr=Math.min(1,(performance.now()-lp.t0)/LP_MS);
     ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -597,7 +937,7 @@ function deleteLastSetup(){
 function startPick(){
   if(!S.bg)return toast('先に図面を開いてください');
   if(!S.setups.length)return toast('先に基準点1（±0）を設定してください');
-  S.pickRef=!S.pickRef;updateHud();
+  S.pickRef=!S.pickRef;if(S.pickRef){S.mode='write';S.tmp=null;S.hover=null;syncBar();}updateHud();
   if(S.pickRef)toast('新しい位置から覗ける既存の測点をタップ');
 }
 async function focusPoint(id){
@@ -616,11 +956,15 @@ function hitMarker(x,y){
   return best;
 }
 function mkPan(id,x,y){return {kind:'pan',id,lx:x,ly:y,sx:x,sy:y,moved:false};}
-function abortG(){if(g){clearTimeout(g.timer);}g=null;lp=null;}
+function abortG(){if(g){clearTimeout(g.timer);}S.cross=false;g=null;lp=null;S.gesturing=false;}
+const PINCH_GAIN=1.9; // 1より大きいほど、指の開閉に対して拡大縮小が大きく動く
+let drawQ=0;
+function drawSoon(){scheduleHi();if(drawQ)return;drawQ=requestAnimationFrame(()=>{drawQ=0;draw();});}
 function startPinch(){
   const t=[...ptrs.values()].filter(q=>q.type==='touch');if(t.length<2)return;
   const cx=(t[0].x+t[1].x)/2,cy=(t[0].y+t[1].y)/2,d=Math.hypot(t[0].x-t[1].x,t[0].y-t[1].y)||1;
   g={kind:'pinch',d0:d,s0:S.view.s,wx:(cx-S.view.tx)/S.view.s,wy:(cy-S.view.ty)/S.view.s};
+  S.gesturing=true;
 }
 function eraseAt(x,y){
   const pl=toPlan(x,y),r=14/S.view.s;let hit=false;
@@ -630,7 +974,14 @@ function eraseAt(x,y){
     for(let i=0;i<a.length;i+=2){if(Math.hypot(a[i]-pl.x,a[i+1]-pl.y)<rr2){hit=true;return false;}}
     return true;
   });
-  if(hit){if(g&&!g.snap){snapshot();g.snap=true;}S.strokes=keep;draw();scheduleSave();}
+  // 仮点線・距離測定も消しゴムで消せる
+  const kr=S.refs.filter(q=>{if(q.page!==S.pageNo)return true;const sg=refSeg(q);return !(sg&&distSegP(pl,sg[0],sg[1])<r);});
+  const km=S.meas.filter(q=>q.page!==S.pageNo||!(distSegP(pl,q.a,q.b)<r));
+  const hr=kr.length!==S.refs.length||km.length!==S.meas.length;
+  if(hit||hr){
+    if(g&&!g.snap){snapshot();g.snap=true;}
+    S.strokes=keep;S.refs=kr;S.meas=km;draw();scheduleSave();if(hr)renderPanel();
+  }
 }
 cv.addEventListener('pointerdown',e=>{
   if(!S.bg)return;e.preventDefault();
@@ -641,6 +992,17 @@ cv.addEventListener('pointerdown',e=>{
   if(e.pointerType==='pen'){for(const [id,q] of ptrs)if(q.type==='touch')ptrs.delete(id);abortG();}
   if([...ptrs.values()].filter(q=>q.type==='touch').length>=2){abortG();startPinch();return;}
   if(e.pointerType==='mouse'&&e.button!==0){g=mkPan(e.pointerId,p.x,p.y);return;}
+  if((MEAS.includes(S.mode)||S.mode==='sel')&&!S.pickRef&&!(e.buttons&32)){
+    if(!(S.tmp&&S.tmp.pts.length)){
+      const lb=hitLabel(p.x,p.y);
+      if(lb){S.selA=lb.m.id;updateHud();g={kind:'lbl',id:e.pointerId,m:lb.m,sx:p.x,sy:p.y,moved:false,a0:{...lb.m.a},b0:{...lb.m.b}};draw();return;}
+    }
+    if(S.mode==='sel'){g={kind:'pan',id:e.pointerId,lx:p.x,ly:p.y,sx:p.x,sy:p.y,moved:false,selTap:true};return;}
+    const gg={kind:'pt',id:e.pointerId,sx:p.x,sy:p.y,touch:e.pointerType!=='mouse',shift:e.shiftKey,fired:false};
+    g=gg;
+    if(!gg.touch){gg.fired=true;S.cross=true;S.hover=pickPt(p.x,p.y,{shift:e.shiftKey,touch:false});draw();}
+    else gg.timer=setTimeout(()=>{if(g!==gg)return;gg.fired=true;S.cross=true;if(navigator.vibrate)navigator.vibrate(20);S.hover=pickPt(gg.sx,gg.sy,{touch:true});draw();},HOLD_MS);
+    return;}
   const drawing=(e.pointerType!=='touch'||S.finger)&&S.mode!=='hand';
   const erasing=S.mode==='erase'||(e.buttons&32);
   const hit=(S.mode==='write'||S.pickRef)&&!erasing?hitMarker(p.x,p.y):null;
@@ -663,13 +1025,13 @@ cv.addEventListener('pointermove',e=>{
   if(g.kind==='pinch'){
     const t=[...ptrs.values()].filter(z=>z.type==='touch');if(t.length<2)return;
     const cx=(t[0].x+t[1].x)/2,cy=(t[0].y+t[1].y)/2,d=Math.hypot(t[0].x-t[1].x,t[0].y-t[1].y)||1;
-    const ns=Math.min(30,Math.max(0.05,g.s0*d/g.d0));
-    S.view.s=ns;S.view.tx=cx-g.wx*ns;S.view.ty=cy-g.wy*ns;draw();return;
+    const ns=Math.min(30,Math.max(0.05,g.s0*Math.pow(d/g.d0,PINCH_GAIN)));
+    S.view.s=ns;S.view.tx=cx-g.wx*ns;S.view.ty=cy-g.wy*ns;drawSoon();return;
   }
   if(g.id!==e.pointerId)return;
   if(g.kind==='pan'){
     if(!g.moved&&Math.hypot(p.x-g.sx,p.y-g.sy)>=MOVE_TH)g.moved=true;
-    S.view.tx+=p.x-g.lx;S.view.ty+=p.y-g.ly;g.lx=p.x;g.ly=p.y;draw();
+    S.view.tx+=p.x-g.lx;S.view.ty+=p.y-g.ly;g.lx=p.x;g.ly=p.y;drawSoon();
   }
   else if(g.kind==='erase'){eraseAt(p.x,p.y);}
   else if(g.kind==='mk'){
@@ -682,6 +1044,18 @@ cv.addEventListener('pointermove',e=>{
       g.moved=true;snapshot();
     }
     const pl=toPlan(p.x,p.y);g.p.x=pl.x;g.p.y=pl.y;draw();
+  }else if(g.kind==='lbl'){
+    if(!g.moved){if(Math.hypot(p.x-g.sx,p.y-g.sy)<MOVE_TH)return;g.moved=true;snapshot();}
+    const dx=(p.x-g.sx)/S.view.s,dy=(p.y-g.sy)/S.view.s,h=Math.abs(dx)>=Math.abs(dy),m=g.m,ox=h?dx:0,oy=h?0:dy;
+    m.a={x:g.a0.x+ox,y:g.a0.y+oy};m.b={x:g.b0.x+ox,y:g.b0.y+oy};drawSoon();
+  }else if(g.kind==='pt'){
+    if(!g.fired){
+      if(Math.hypot(p.x-g.sx,p.y-g.sy)<MOVE_TH)return;
+      clearTimeout(g.timer);const sx=g.sx,sy=g.sy;g=mkPan(e.pointerId,p.x,p.y);g.moved=true;
+      S.view.tx+=p.x-sx;S.view.ty+=p.y-sy;draw();return;
+    }
+    g.shift=e.shiftKey||g.shift;g.lx=p.x;g.ly=p.y;
+    S.hover=pickPt(p.x,p.y,{shift:g.shift,touch:g.touch});drawSoon();
   }else if(g.kind==='write'){
     // 押したまま動かしても手書きはせず、画面移動にする（長押しで測点追加）
     if(Math.hypot(p.x-g.sx,p.y-g.sy)<MOVE_TH)return;
@@ -691,15 +1065,19 @@ cv.addEventListener('pointermove',e=>{
   }
 });
 function endPtr(e){
+  scheduleHi();
   ptrs.delete(e.pointerId);
   if(!g)return;
   if(g.kind==='pinch'){
     const t=[...ptrs.values()].filter(z=>z.type==='touch');
-    if(t.length<2){g=t.length===1?{kind:'pan',id:t[0].id,lx:t[0].x,ly:t[0].y,sx:t[0].x,sy:t[0].y,moved:true}:null;}
+    if(t.length<2){S.gesturing=false;draw();g=t.length===1?{kind:'pan',id:t[0].id,lx:t[0].x,ly:t[0].y,sx:t[0].x,sy:t[0].y,moved:true}:null;}
     return;
   }
   if(g.id!==e.pointerId)return;
   clearTimeout(g.timer);lp=null;
+  if(g.kind==='lbl'){const mv=g.moved;g=null;if(mv)refresh();else draw();return;}
+  if(g.kind==='pt'){const gg=g;g=null;S.cross=false;S.hover=null;const px=gg.lx!==undefined?gg.lx:gg.sx,py=gg.ly!==undefined?gg.ly:gg.sy;if(e.type!=='pointercancel')onTap(px,py,{shift:gg.shift,touch:gg.touch});else draw();return;}
+  if(g.kind==='pan'&&g.selTap&&!g.moved){const gg=g;g=null;selectAt(gg.sx,gg.sy);return;}
   if(g.kind==='write'&&g.stroke&&g.stroke.pts.length>=4){snapshot();S.strokes.push(g.stroke);g=null;refresh();return;}
   if(g.kind==='mk'){
     const gp=g.p,moved=g.moved,wasSel=g.sel;g=null;
@@ -714,8 +1092,18 @@ function endPtr(e){
 }
 cv.addEventListener('pointerup',endPtr);
 cv.addEventListener('pointercancel',endPtr);
-cv.addEventListener('wheel',e=>{e.preventDefault();if(!S.bg)return;const p=pos(e);zoomAt(p.x,p.y,Math.exp(-e.deltaY*(e.ctrlKey?0.01:0.0015)));},{passive:false});
+cv.addEventListener('pointermove',e=>{
+  if(e.pointerType!=='mouse'||!S.bg||!MEAS.includes(S.mode)||S.pickRef||e.buttons)return;
+  const p=pos(e);S.lastMouse=p;S.hover=pickPt(p.x,p.y,{shift:e.shiftKey,touch:false});drawSoon();
+});
+['keydown','keyup'].forEach(n=>document.addEventListener(n,e=>{
+  if(e.key!=='Shift'||!S.lastMouse||!S.bg||!MEAS.includes(S.mode)||S.pickRef)return;
+  S.hover=pickPt(S.lastMouse.x,S.lastMouse.y,{shift:n==='keydown',touch:false});drawSoon();
+}));
+cv.addEventListener('pointerleave',()=>{S.lastMouse=null;if(S.hover){S.hover=null;drawSoon();}});
+cv.addEventListener('wheel',e=>{e.preventDefault();if(!S.bg)return;const p=pos(e);zoomAt(p.x,p.y,Math.exp(-e.deltaY*(e.ctrlKey?0.02:0.0025)));},{passive:false});
 cv.addEventListener('contextmenu',e=>e.preventDefault());
+['gesturestart','gesturechange','gestureend'].forEach(n=>document.addEventListener(n,e=>e.preventDefault(),{passive:false}));
 
 /* ---------- 図面読込 ---------- */
 async function loadPdfDoc(){
@@ -733,20 +1121,52 @@ async function loadImageCanvas(){
   c.getContext('2d').drawImage(img,0,0,c.width,c.height);URL.revokeObjectURL(url);
   S.imgCanvas=c;S.numPages=1;S.pdfDoc=null;
 }
+/* ---------- 高画質表示：拡大時は見えている範囲をPDFから高解像度で描き直す ---------- */
+let hiTimer=null,hiTok=0,hiTask=null;
+function scheduleHi(){clearTimeout(hiTimer);hiTimer=setTimeout(renderHi,200);}
+async function renderHi(){
+  if(S.kind!=='pdf'||!S.pdfDoc||!S.bg||!S.W)return;
+  const dpr=devicePixelRatio||1,v=S.view,need=v.s*dpr;
+  if(need<=1.05){if(S.hi){S.hi=null;draw();}return;}
+  const r=wrap.getBoundingClientRect();
+  const vx0=-v.tx/v.s,vy0=-v.ty/v.s,vx1=(r.width-v.tx)/v.s,vy1=(r.height-v.ty)/v.s;
+  const h=S.hi;
+  if(h&&h.page===S.pageNo&&h.k>=need*0.95&&vx0>=h.x0-1&&vy0>=h.y0-1&&vx1<=h.x0+h.w+1&&vy1<=h.y0+h.h+1)return;
+  const mw=(vx1-vx0)*0.25,mh=(vy1-vy0)*0.25,MAXPX=14e6;
+  let x0=Math.max(0,vx0-mw),y0=Math.max(0,vy0-mh),x1=Math.min(S.W,vx1+mw),y1=Math.min(S.H,vy1+mh);
+  if(x1<=x0||y1<=y0)return;
+  let k=need;
+  if((x1-x0)*(y1-y0)*k*k>MAXPX){x0=Math.max(0,vx0);y0=Math.max(0,vy0);x1=Math.min(S.W,vx1);y1=Math.min(S.H,vy1);if(x1<=x0||y1<=y0)return;}
+  if((x1-x0)*(y1-y0)*k*k>MAXPX)k=Math.sqrt(MAXPX/((x1-x0)*(y1-y0)));
+  const tok=++hiTok,page=S.pageNo;
+  if(hiTask){try{hiTask.cancel();}catch(_){}}
+  try{
+    const pg=await S.pdfDoc.getPage(page);
+    if(tok!==hiTok)return;
+    const vp=pg.getViewport({scale:S.rs*k});
+    const c=document.createElement('canvas');
+    c.width=Math.max(1,Math.ceil((x1-x0)*k));c.height=Math.max(1,Math.ceil((y1-y0)*k));
+    const cx=c.getContext('2d');cx.fillStyle='#fff';cx.fillRect(0,0,c.width,c.height);
+    hiTask=pg.render({canvasContext:cx,viewport:vp,transform:[1,0,0,1,-x0*k,-y0*k]});
+    await hiTask.promise;
+    if(tok!==hiTok||page!==S.pageNo)return;
+    S.hi={page,x0,y0,w:c.width/k,h:c.height/k,k,c};draw();
+  }catch(err){/* 再描画で中断された場合など */}
+}
 async function showPage(n){
-  const tok=++renderTok;
+  const tok=++renderTok;S.hi=null;
   if(S.kind==='image'){S.bg=S.imgCanvas;}
   else{
     const page=await S.pdfDoc.getPage(n);
     const v1=page.getViewport({scale:1});
     const sc=Math.min(4000/Math.max(v1.width,v1.height),6);
-    const vp=page.getViewport({scale:sc});
+    const vp=page.getViewport({scale:sc});S.rs=sc;
     const c=document.createElement('canvas');c.width=Math.round(vp.width);c.height=Math.round(vp.height);
     await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;
     if(tok!==renderTok)return;
     S.bg=c;
   }
-  S.W=S.bg.width;S.H=S.bg.height;S.pageNo=n;fitView();refresh();
+  S.W=S.bg.width;S.H=S.bg.height;S.pageNo=n;S.tmp=null;S.hover=null;fitView();refresh();scheduleHi();
 }
 async function openFile(f){
   if(!f)return;
@@ -787,6 +1207,62 @@ function exportPng(){
   renderScene(c.getContext('2d'),1,{s:1,tx:0,ty:0},Math.max(1,S.W/1100),false);
   c.toBlob(b=>download(b,`${baseName()}_高さ記入_${stamp()}.png`));
 }
+
+/* ---------- PDF出力（A3） ---------- */
+async function loadJsPdf(){
+  if(window.jspdf)return;
+  await new Promise((res,rej)=>{const t=document.createElement('script');t.src='https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';t.onload=res;t.onerror=()=>rej(new Error('PDF出力ライブラリを読み込めません。通信環境を確認してください。'));document.head.appendChild(t);});
+}
+function pdfDrawPage(n){
+  const land=S.W>=S.H,cw=land?2480:1754,ch=land?1754:2480,c=document.createElement('canvas');c.width=cw;c.height=ch;
+  const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,cw,ch);
+  const m=50,hd=70,aw=cw-2*m,ah=ch-2*m-hd,sc=Math.min(aw/S.W,ah/S.H);
+  const tx=m+(aw-S.W*sc)/2,ty=m+hd+(ah-S.H*sc)/2;
+  x.fillStyle='#111';x.font='bold 38px sans-serif';x.textBaseline='top';x.textAlign='left';
+  x.fillText(`${S.siteName||''}　測定図　${n}/${S.numPages||1}ページ　${stamp()}`,m,m);
+  x.save();x.beginPath();x.rect(m,m+hd,aw,ah);x.clip();
+  renderScene(x,1,{s:sc,tx,ty},cw/1100,false);
+  x.restore();x.strokeStyle='#000';x.lineWidth=2;x.strokeRect(m,m+hd,aw,ah);
+  return c;
+}
+function pdfTablePages(){
+  const pts=[...S.points].sort((a,b)=>a.no-b.no);if(!pts.length&&!S.meas.length)return [];
+  const u=unitLabel(),cols=['測点','設置','読み値(mm)',`設置基準比(${u})`,`基準点1比(${u})`];if(S.base!=='p1')cols.push(`${BASE_NAME[S.base]}比(${u})`);
+  const rows=pts.map(p=>{const s=S.setups.find(z=>z.id===p.setupId),rel=s&&p.id===s.refPointId?0:(s?s.refReading-p.reading:0);
+    const r=[String(p.no),'設置'+(s?s.idx+1:'?'),fmtR(p.reading),fmtH(rel),fmtH(CALC.elev[p.id])];if(S.base!=='p1')r.push(fmtH(heightIn(p.id,S.base)));return r;});
+  S.meas.forEach((q,i)=>{const d=distMM(q.a,q.b),r=['距離'+(i+1),q.page+'頁',fmtMM(d),fmtM(d),''];while(r.length<cols.length)r.push('');rows.push(r);});
+  const cw=2480,ch=1754,m=50,hd=70,rh=64,per=Math.floor((ch-2*m-hd-rh)/rh),out=[];
+  for(let o=0;o<rows.length;o+=per){
+    const c=document.createElement('canvas');c.width=cw;c.height=ch;const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,cw,ch);
+    x.textBaseline='middle';x.fillStyle='#111';x.font='bold 38px sans-serif';x.textAlign='left';x.fillText(`${S.siteName||''}　測点一覧（${BASE_NAME[S.base]}基準）`,m,m+30);
+    const w=(cw-2*m)/cols.length;let y=m+hd;
+    x.fillStyle='#e6eaf0';x.fillRect(m,y,cw-2*m,rh);x.fillStyle='#111';x.font='bold 32px sans-serif';x.textAlign='center';
+    cols.forEach((t,i)=>x.fillText(t,m+w*i+w/2,y+rh/2));y+=rh;x.font='34px sans-serif';
+    rows.slice(o,o+per).forEach(r=>{x.strokeStyle='#999';x.lineWidth=1;x.strokeRect(m,y,cw-2*m,rh);r.forEach((t,i)=>x.fillText(t,m+w*i+w/2,y+rh/2));y+=rh;});
+    out.push(c);
+  }
+  return out;
+}
+async function exportPdf(){
+  if(!S.bg)return toast('図面がありません');
+  toast('PDFを作成中…');
+  const cur=S.pageNo,selS=S.sel,selA=S.selA;
+  try{
+    await loadJsPdf();const {jsPDF}=window.jspdf;S.sel=null;S.selA=null;
+    let doc=null;
+    const add=c=>{const o=c.width>=c.height?'l':'p';if(!doc)doc=new jsPDF({orientation:o,unit:'mm',format:'a3'});else doc.addPage('a3',o);doc.addImage(c.toDataURL('image/jpeg',.92),'JPEG',0,0,o==='l'?420:297,o==='l'?297:420);};
+    for(let n=1;n<=(S.numPages||1);n++){
+      const has=S.points.some(p=>p.page===n)||S.refs.some(r=>r.page===n)||S.meas.some(q=>q.page===n)||S.strokes.some(t=>t.page===n);
+      if(!has&&n!==cur)continue;
+      if(S.pageNo!==n)await showPage(n);
+      add(pdfDrawPage(n));
+    }
+    pdfTablePages().forEach(add);
+    if(S.pageNo!==cur)await showPage(cur);
+    S.sel=selS;S.selA=selA;refresh();
+    doc.save(`${baseName()}_測定図_A3_${stamp()}.pdf`);toast('A3のPDFを出力しました');
+  }catch(err){S.sel=selS;S.selA=selA;refresh();alert('PDF出力に失敗：'+err.message);}
+}
 const bufToB64=buf=>new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(fr.result.split(',')[1]);fr.readAsDataURL(new Blob([buf]));});
 function b64ToBuf(b){const bin=atob(b),u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u.buffer;}
 async function saveProject(){
@@ -817,6 +1293,8 @@ function updateHud(){
   const h=$('#hud');let t='';
   if(!S.bg)t=S.points.length?'この現場の図面データがありません。「📂 図面を開く」で同じ図面を読み込み直すと測点が復元されます':`現場「${S.siteName||'—'}」：「📂 図面を開く」からPDF配置図を読み込んでください`;
   else if(S.pickRef)t='🔄 新しいレベル位置から覗ける【既存の測点】をタップして基準点にします <button id="hCancel">中止</button>';
+  else if(S.mode==='sel')t='👆 選択：仮線・延長線・距離の線／寸法の文字を押さえて選択。寸法の文字を動かすと、水平または垂直に全体が移動します';
+  else if(MEAS.includes(S.mode))t=measHint();
   else if(!S.setups.length)t='① レベルを据え、±0にしたい点の位置をペンで【長押し】→ 読み値を入力（赤色の基準点1）';
   else{const s=S.setups.find(z=>z.id===S.activeId)||S.setups[S.setups.length-1];t=`設置${s.idx+1} 入力中：覗ける測点をペンで【長押し】→ 読み値入力（次は測点${S.nextNo}）／ 押したまま動かすと画面移動`;}
   let selBar='';
@@ -825,17 +1303,23 @@ function updateHud(){
     const mv=sp.x!==sp.ax||sp.y!==sp.ay;
     selBar=`<span style="background:rgba(255,255,255,.96);color:#222;border:1px solid #9aa4af">測点${sp.no} 選択中：ドラッグで移動（押さえた位置は線で残ります）<button id="hEdit">✎ 編集</button>${mv?'<button id="hReset">↩ 元の位置へ</button>':''}<button id="hDesel">✕ 解除</button></span>`;
   }
+  const sa=S.selA!==null&&S.bg?annoById(S.selA):null;
+  if(sa)selBar+=`<span style="background:rgba(255,255,255,.96);color:#222;border:1px solid #9aa4af">${annoName(sa)} 選択中：寸法の文字をドラッグで水平・垂直移動<button id="hDelA" class="danger">🗑 削除</button><button id="hDesA">✕ 解除</button></span>`;
   h.innerHTML=`<span>${t}</span>${selBar}`;
 }
 $('#hud').addEventListener('click',e=>{
   const id=e.target.id,p=S.sel!==null?pointById(S.sel):null;
+  if(id==='hDelA'){delAnno();return;}
+  if(id==='hDesA'){S.selA=null;updateHud();draw();return;}
   if(id==='hCancel'){S.pickRef=false;updateHud();}
+  else if(id==='hTmp'){S.tmp=null;updateHud();draw();}
   else if(id==='hEdit'&&p)editPoint(p);
   else if(id==='hReset'&&p){snapshot();p.x=p.ax;p.y=p.ay;refresh();}
   else if(id==='hDesel'){S.sel=null;refresh();}
 });
 function syncBar(){
-  document.querySelectorAll('#modes button').forEach(b=>b.classList.toggle('on',b.dataset.mode===S.mode));
+  document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('on',b.dataset.mode===S.mode));
+  $('#bSnap').classList.toggle('on',S.snapOn);$('#bOrtho').classList.toggle('on',S.orthoAuto);
   document.querySelectorAll('#bases button').forEach(b=>{b.classList.toggle('on',b.dataset.base===S.base);b.classList.toggle('dis',baseOffset(b.dataset.base)===null);});
 }
 function renderPanel(){
@@ -843,6 +1327,15 @@ function renderPanel(){
   const D=S.datum,dv=v=>v==null?'未入力':fmtH(v);
   let h='<div class="pbtns"><button data-act="newSetup" class="acc">🔄 レベルを据え直す（基準点を選ぶ）</button></div>';
   h+=`<div class="pbtns"><button data-act="datum">📐 基準高さ（KBM・GL・FL）を設定</button><div class="sinfo" style="border:1px solid var(--line);border-radius:8px;margin-top:6px">最初の据付時の視準高（KBMから） ${dv(D.k)}<br>KBM→設計GL ${dv(D.g)}　／　設計GL→FL ${dv(D.f)}　${unitLabel()}<br>表示基準：<b>${BASE_NAME[S.base]}</b></div></div>`;
+  {
+    const sc=scaleOf(),mp=mmPerPx(),refN=pageRefs().length,ms=S.meas.filter(q=>q.page===S.pageNo);
+    const dpx=sc?Math.hypot(sc.a.x-sc.b.x,sc.a.y-sc.b.y):0;
+    const rows=ms.map((q,i)=>{const d=distMM(q.a,q.b);return `<tr data-ms="${q.id}" style="cursor:pointer"><td><span class="no" style="background:${C_MEAS}">${i+1}</span></td><td class="big">${fmtMM(d)}</td><td>${fmtM(d)}</td><td><button data-act="delMeas" data-id="${q.id}">✕</button></td></tr>`;}).join('');
+    h+=`<div class="setup"><div class="sh"><b>📏 縮尺・仮線・距離（${S.pageNo}ページ）</b></div>
+      <div class="sinfo">縮尺：${sc?`設定済み　<button data-act="clrScale" class="danger">解除</button>`:'<span class="neg">未設定</span>　バーの「📏 縮尺」で図面上の2点を押し、実寸を入力します'}<br>仮点線 ${refN}本${refN?'　<button data-act="clrRefs" class="danger">仮線を全消去</button>':''}</div>
+      ${ms.length?`<table><thead><tr><th>No</th><th>距離</th><th>m</th><th></th></tr></thead><tbody>${rows}</tbody></table><div class="sinfo"><button data-act="clrMeas" class="danger">距離測定を全消去</button></div>`:'<div class="sinfo">距離測定はまだありません</div>'}
+    </div>`;
+  }
   if(!S.setups.length)h+='<p class="empty">まだ測点がありません。<br>レベルを据え、±0にしたい点を覗いて、図面上のその位置を<b>ペンで長押し</b>してください。以降、覗ける測点を順に長押しして読み値を入力します。</p>';
   const unit=unitLabel();
   S.setups.forEach((s,si)=>{
@@ -884,9 +1377,14 @@ $('#pbody').addEventListener('click',async e=>{
     else if(a==='editPt'){const p=pointById(id);if(p){await focusPoint(id);editPoint(p);}}
     else if(a==='editSetup'){const s=S.setups.find(z=>z.id===id);if(s)editSetup(s);}
     else if(a==='delSetup')deleteLastSetup();
+    else if(a==='delMeas'){snapshot();S.meas=S.meas.filter(q=>q.id!==id);refresh();}
+    else if(a==='clrMeas'){if(confirm('このページの距離測定をすべて消去します。よろしいですか？')){snapshot();S.meas=S.meas.filter(q=>q.page!==S.pageNo);refresh();}}
+    else if(a==='clrRefs'){if(confirm('このページの仮点線をすべて消去します。よろしいですか？')){snapshot();S.refs=S.refs.filter(q=>q.page!==S.pageNo);refresh();}}
+    else if(a==='clrScale'){if(confirm('このページの縮尺設定を解除します。よろしいですか？')){snapshot();delete S.scales[S.pageNo];refresh();}}
     else if(a==='clearAll'){if(confirm('すべての測点・設置・手書きを消去します。よろしいですか？')){snapshot();S.points=[];S.strokes=[];S.setups=[];S.activeId=null;S.nextNo=1;S.sel=null;S.pickRef=false;refresh();}}
     return;
   }
+  const ms=e.target.closest('tr[data-ms]');if(ms){const q=S.meas.find(z=>z.id===+ms.dataset.ms);if(q)focusXY((q.a.x+q.b.x)/2,(q.a.y+q.b.y)/2);return;}
   const tr=e.target.closest('tr[data-pt]');if(tr){focusPoint(+tr.dataset.pt);return;}
   const sh=e.target.closest('.setup');if(sh&&e.target.closest('.sh')){S.activeId=+sh.dataset.setup;S.pickRef=false;refresh();}
 });
@@ -906,22 +1404,39 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden)flushSave()
 $('#file').onchange=e=>{openFile(e.target.files[0]);e.target.value='';};
 $('#bLoad').onclick=()=>$('#jfile').click();
 $('#jfile').onchange=e=>{loadProject(e.target.files[0]);e.target.value='';};
-$('#bSave').onclick=saveProject;$('#bCsv').onclick=exportCsv;$('#bPng').onclick=exportPng;
+$('#bSave').onclick=saveProject;$('#bCsv').onclick=exportCsv;$('#bPng').onclick=exportPng;$('#bPdf').onclick=exportPdf;
 $('#bUndo').onclick=undo;$('#bRedo').onclick=redo;
-$('#bFit').onclick=()=>{fitView();draw();};
+$('#bFit').onclick=()=>{fitView();draw();scheduleHi();};
 $('#bNew').onclick=startPick;
 $('#bDatum').onclick=openDatum;
 document.querySelectorAll('#bases button').forEach(b=>b.onclick=()=>setBase(b.dataset.base));
 $('#bPrev').onclick=()=>{if(S.pageNo>1)showPage(S.pageNo-1);};
 $('#bNext').onclick=()=>{if(S.pageNo<S.numPages)showPage(S.pageNo+1);};
-$('#bPanel').onclick=()=>$('#panel').classList.toggle('closed');
-document.querySelectorAll('#modes button').forEach(b=>b.onclick=()=>{S.mode=b.dataset.mode;syncBar();});
+function syncPanelUi(){
+  const closed=$('#panel').classList.contains('closed');
+  $('#pTab').textContent=closed?'📋 測点表を表示':'✕ 測点表を隠す';
+  $('#bPanel').classList.toggle('on',!closed);
+}
+function togglePanel(force){
+  const pn=$('#panel');
+  pn.classList.toggle('closed',force===undefined?!pn.classList.contains('closed'):!force);
+  syncPanelUi();
+}
+$('#bPanel').onclick=()=>togglePanel();
+$('#pTab').onclick=()=>togglePanel();
+$('#pClose').onclick=()=>togglePanel(false);
+document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>setMode(b.dataset.mode));
+$('#bOrtho').onclick=()=>{S.orthoAuto=!S.orthoAuto;syncBar();scheduleSave();toast(S.orthoAuto?'水平垂直の自動補正：ON（Shiftでも固定できます）':'水平垂直の自動補正：OFF（Shift固定は使えます）');};
+$('#bSnap').onclick=()=>{S.snapOn=!S.snapOn;S.hover=null;syncBar();scheduleSave();draw();};
 document.addEventListener('keydown',e=>{
   if($('#modal').classList.contains('show'))return;
+  if(S.selA!==null&&(e.key==='Delete'||e.key==='Backspace')){e.preventDefault();delAnno();return;}
+  if(e.key==='Escape'&&S.tmp){S.tmp=null;updateHud();draw();return;}
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo();}
 });
 new ResizeObserver(resize).observe(wrap);
 if(innerWidth<900)$('#panel').classList.add('closed');
+syncPanelUi();
 
 /* ---------- 起動 ---------- */
 (async()=>{
